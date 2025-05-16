@@ -10,6 +10,7 @@ const accessToken = "pk.eyJ1IjoiZmxpeDI5IiwiYSI6ImNtYXI1ZHI5YzA2Y3EybXM5ZjVrZWw0
 
 function App() {
     const [inputValue, setInputValue] = useState("");
+    const [marker, setMarker] = useState<mapboxgl.Marker | null>(null);
 
     const mapRef = useRef<mapboxgl.Map | undefined>(undefined)
     const mapContainerRef = useRef<HTMLDivElement>(null)
@@ -36,6 +37,12 @@ function App() {
         }
     }, [])
 
+    const popUp = new mapboxgl.Popup({
+        offset: 25,
+        closeButton: true,
+        closeOnClick: false,
+    });
+
     return (
         <>
             <div id="searchbox">
@@ -47,7 +54,29 @@ function App() {
                     onChange={(d) => {
                         setInputValue(d);
                     }}
-                    marker
+                    onRetrieve={(response) => {
+                        const name = response.features.map(value => value.properties.name)[0];
+                        const address = response.features.map(value => value.properties.full_address)[0];
+                        const longitude = response.features[0].geometry.coordinates[0];
+                        const latitude = response.features[0].geometry.coordinates[1];
+
+                        setInputValue(name)
+
+                        if (marker) {
+                            marker.remove()
+                        }
+
+                        const newMarker = new mapboxgl.Marker()
+                            .setLngLat([longitude, latitude])
+                            .setPopup(popUp.setHTML(name + "<br>" + address))
+                            .addTo(mapRef.current as mapboxgl.Map)
+                            .togglePopup();
+                        setMarker(newMarker)
+                        mapRef.current?.flyTo({
+                            center: [longitude, latitude],
+                            zoom: 14
+                        })
+                    }}
                 />
             </div>
             <div id="map-container" ref={mapContainerRef}/>
