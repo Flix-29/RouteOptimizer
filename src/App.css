@@ -1,3 +1,10 @@
+@import "tailwindcss";
+
+button {
+    cursor: pointer;
+    color: #FAF9F6;
+}
+
 #root {
     position: absolute;
     top: 0;
@@ -18,4 +25,29 @@
     left: 10px;
     z-index: 1000;
     width: 25%;
+}
+
+#stops {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 1000;
+    width: 20%;
+    background-color: rgba(200, 200, 200, 0.8);
+}
+
+#start-route {
+    background-color: #4CAF50;
+}
+
+#clear-route {
+    background-color: #f44336;
+}
+
+#add-stop-btn {
+    background-color: #9e9d9d;
+}
+
+#delete-stop-btn {
+    color: rgba(200, 200, 200, 0.8);
 }
