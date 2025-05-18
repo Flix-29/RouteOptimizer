@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState} from "react";
-import mapboxgl, {FullscreenControl, GeolocateControl, NavigationControl} from 'mapbox-gl'
+import mapboxgl, {FullscreenControl, GeoJSONSource, GeolocateControl, NavigationControl} from 'mapbox-gl'
 import {SearchBox} from "@mapbox/search-js-react";
 
 import 'mapbox-gl/dist/mapbox-gl.css'
@@ -8,6 +8,7 @@ import './App.css'
 import type {Stop} from "./model/Stop.ts";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faXmark} from "@fortawesome/free-solid-svg-icons";
+import {optimizeAndGetRoute} from "./mapboxApi/mapboxApiAccessor.ts";
 
 const accessToken = "pk.eyJ1IjoiZmxpeDI5IiwiYSI6ImNtYXI1ZHI5YzA2Y3EybXM5ZjVrZWw0Z3gifQ.JznGkaiMFAghv0g9qHTJnQ"
 
@@ -16,6 +17,7 @@ function App() {
     const [address, setAddress] = useState("");
     const [marker, setMarker] = useState<mapboxgl.Marker | null>(null);
     const [stops, setStops] = useState<Stop[]>([]);
+    const [isFirstLoad, setIsFirstLoad] = useState(true);
 
     const mapRef = useRef<mapboxgl.Map | undefined>(undefined)
     const mapContainerRef = useRef<HTMLDivElement>(null)
@@ -52,7 +54,6 @@ function App() {
 
     useEffect(() => {
         document.getElementById('add-stop-btn')?.addEventListener('click', () => {
-            console.log("clicked");
             const stop: Stop = {
                 name: inputValue,
                 address: address,
@@ -60,12 +61,92 @@ function App() {
                 latitude: marker?.getLngLat().lat == undefined ? 0 : marker?.getLngLat().lat
             }
             setStops(stops.concat(stop));
-            console.log(stops)
+            marker?.togglePopup();
+            marker?.remove();
         })
     });
 
-    function startRoute() {
-        console.log("Start route");
+    useEffect(() => {
+        if (!mapRef.current?.isStyleLoaded() && isFirstLoad) {
+            setIsFirstLoad(false);
+            return;
+        }
+        if (mapRef.current?.getLayer('points-circle') || mapRef.current?.getLayer('points')) {
+            mapRef.current.removeLayer('points-circle');
+            mapRef.current.removeLayer('points');
+            mapRef.current.removeSource('points');
+        }
+        mapRef.current?.addSource('points', {
+            'type': 'geojson',
+            'data': {
+                'type': 'FeatureCollection',
+                'features': stops.map(stop => {
+                    return {
+                        'type': 'Feature',
+                        'geometry': {
+                            'type': 'Point',
+                            'coordinates': [stop.longitude, stop.latitude]
+                        },
+                        'properties': {
+                            'title': stop.name,
+                            'address': stop.address
+                        }
+                    }
+                })
+            }
+        });
+        mapRef.current?.addLayer({
+            'id': 'points-circle',
+            'type': 'circle',
+            'source': 'points',
+            'paint': {
+                'circle-radius': 8,
+                'circle-color': '#3887be',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff'
+            }
+        });
+        mapRef.current?.addLayer({
+            'id': 'points',
+            'type': 'symbol',
+            'source': 'points',
+            'layout': {
+                'text-field': ['get', 'title'],
+                'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold'],
+                'text-offset': [0, 0.5],
+                'text-anchor': 'top'
+            },
+        });
+    }, [stops, isFirstLoad]);
+
+    async function startRoute() {
+        const response = optimizeAndGetRoute(stops)
+        const geojson: GeoJSON.GeoJSON = {
+            'type': 'Feature',
+            'properties': {},
+            'geometry': await response.then(data => data.trips[0].geometry)
+        };
+
+        if (mapRef.current?.getSource('route')) {
+            (mapRef.current.getSource('route') as GeoJSONSource).setData(geojson);
+        } else {
+            mapRef.current?.addLayer({
+                id: 'route',
+                type: 'line',
+                source: {
+                    type: 'geojson',
+                    data: geojson
+                },
+                layout: {
+                    'line-join': 'round',
+                    'line-cap': 'round'
+                },
+                paint: {
+                    'line-color': '#2ca4bf',
+                    'line-width': 8
+                }
+            });
+        }
     }
 
     return (
@@ -123,7 +204,7 @@ function App() {
                                     </div>
                                     <>
                                         <button type="button" className="rounded p-2 ml-auto" id="delete-stop-btn"
-                                                onClick={() => setStops(stops.filter(item => item !== stop))}>
+                                                onClick={() => setStops(stops => stops.filter(item => item !== stop))}>
                                             <FontAwesomeIcon icon={faXmark}/>
                                         </button>
                                     </>

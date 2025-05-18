@@ -1,4 +1,3 @@
-
 export interface Stop {
     name: string;
     address: string;
