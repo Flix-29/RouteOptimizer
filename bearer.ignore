@@ -1,0 +1,8 @@
+{
+    "d2b2c5f0a4a84f4286c7209e2a102936_0": {
+        "author": "flix-29",
+        "description": "No user input is used in the Html String, no security risk",
+        "false_positive": true,
+        "ignored_at": "2025-05-19T09:00:00Z"
+    },
+}

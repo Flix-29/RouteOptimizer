@@ -169,7 +169,6 @@ function App() {
                         setInputValue(name)
                         setAddress(address)
 
-                        //TODO: leave marker on map, need to manage event listeners, toggle popup
                         if (marker) {
                             marker.remove()
                         }
