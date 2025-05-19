@@ -17,7 +17,8 @@ const accessToken = "pk.eyJ1IjoiZmxpeDI5IiwiYSI6ImNtYXI1ZHI5YzA2Y3EybXM5ZjVrZWw0
 function App() {
     const [inputValue, setInputValue] = useState("");
     const [address, setAddress] = useState("");
-    const [marker, setMarker] = useState<mapboxgl.Marker | null>(null);
+    const [marker, setMarker] = useState<mapboxgl.Marker>();
+    const [location, setLocation] = useState<Stop>();
     const [stops, setStops] = useState<Stop[]>([]);
     const [isFirstLoad, setIsFirstLoad] = useState(true);
 
@@ -49,10 +50,58 @@ function App() {
             }), 'top-right')
             .addControl(new FullscreenControl(), 'top-right')
 
+        navigator.geolocation.getCurrentPosition(position => setLocation({
+            name: "Current location",
+            address: "Current location",
+            longitude: position.coords.longitude,
+            latitude: position.coords.latitude
+        }))
+
         return () => {
             mapRef.current?.remove()
         }
     }, [])
+
+    useEffect(() => {
+        if (!location) {
+            return;
+        }
+        mapRef.current?.setCenter({
+            lat: location.latitude,
+            lon: location.longitude,
+        }).setZoom(14)
+            .addLayer(
+                {
+                    id: 'location',
+                    type: 'circle',
+                    source: {
+                        type: 'geojson',
+                        data: {
+                            type: 'FeatureCollection',
+                            features: [
+                                {
+                                    type: 'Feature',
+                                    geometry: {
+                                        type: 'Point',
+                                        coordinates: [location.longitude, location.latitude]
+                                    },
+                                    properties: {
+                                        title: location.name,
+                                        address: location.address
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    paint: {
+                        'circle-radius': 8,
+                        'circle-color': '#bc0d20',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                }
+            )
+    }, [location]);
 
     useEffect(() => {
         document.getElementById('add-stop-btn')?.addEventListener('click', () => {
@@ -77,6 +126,9 @@ function App() {
             mapRef.current.removeLayer('points-circle');
             mapRef.current.removeLayer('points');
             mapRef.current.removeSource('points');
+        }
+        if (!stops || stops.length === 0) {
+            return;
         }
         mapRef.current?.addSource('points', {
             'type': 'geojson',
@@ -122,7 +174,8 @@ function App() {
     }, [stops, isFirstLoad]);
 
     async function startRoute() {
-        const response = optimizeAndGetRoute(stops)
+        const routeStops = [location].concat(stops) as Stop[];
+        const response = optimizeAndGetRoute(routeStops);
         const geojson: GeoJSON.GeoJSON = {
             'type': 'Feature',
             'properties': {},
