@@ -1,15 +1,17 @@
-import {useEffect, useRef, useState} from "react";
-import mapboxgl, {FullscreenControl, GeoJSONSource, GeolocateControl, NavigationControl} from 'mapbox-gl'
-import {SearchBox} from "@mapbox/search-js-react";
-
+import './App.css'
 import 'mapbox-gl/dist/mapbox-gl.css'
 
-import './App.css'
-import type {Stop} from "./model/Stop.ts";
+import React, {useEffect, useRef, useState} from "react";
+import mapboxgl, {FullscreenControl, GeoJSONSource, GeolocateControl, NavigationControl} from 'mapbox-gl'
+import {SearchBox as RawSearchBox} from '@mapbox/search-js-react';
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faXmark} from "@fortawesome/free-solid-svg-icons";
 import {optimizeAndGetRoute} from "./mapboxApi/mapboxApiAccessor.ts";
 
+import type {Stop} from "./model/Stop.ts";
+import type {SearchBoxProps} from "@mapbox/search-js-react/dist/components/SearchBox";
+
+const SearchBox = RawSearchBox as React.ForwardRefExoticComponent<React.PropsWithoutRef<SearchBoxProps>>;
 const accessToken = "pk.eyJ1IjoiZmxpeDI5IiwiYSI6ImNtYXI1ZHI5YzA2Y3EybXM5ZjVrZWw0Z3gifQ.JznGkaiMFAghv0g9qHTJnQ"
 
 function App() {
@@ -213,7 +215,7 @@ function App() {
                     </ul>
                     <div className="flex m-3 mb-0 justify-between">
                         <button type="button" id="start-route" className="rounded p-2"
-                                onClick={() => startRoute()}>Start route
+                                onClick={() => startRoute()}>Optimize route
                         </button>
                         <button type="button" id="clear-route" className="rounded p-2"
                                 onClick={() => setStops([])}>Clear route
