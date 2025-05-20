@@ -3,4 +3,5 @@ export interface Stop {
     address: string;
     longitude: number;
     latitude: number;
+    index?: number;
 }

@@ -126,6 +126,7 @@ function App() {
             mapRef.current.removeLayer('points-circle');
             mapRef.current.removeLayer('points');
             mapRef.current.removeSource('points');
+            //TODO: remove route on stops change
         }
         if (!stops || stops.length === 0) {
             return;
@@ -176,6 +177,12 @@ function App() {
     async function startRoute() {
         const routeStops = [location].concat(stops) as Stop[];
         const response = optimizeAndGetRoute(routeStops);
+        await response.then(data => data.waypoints.map((data: { waypoint_index: number; }, index: number) => {
+            if (index === 0) {
+                return;
+            }
+            stops[index - 1].index = data.waypoint_index
+        }))
         const geojson: GeoJSON.GeoJSON = {
             'type': 'Feature',
             'properties': {},
@@ -252,6 +259,12 @@ function App() {
                         {stops.map((stop, index) => (
                             <li key={index}>
                                 <div className="flex mt-2 rounded-lg bg-gray-100 p-2">
+                                    {/*TODO: fix display*/}
+                                    {stops && stops.filter(item => item.index !== undefined).length > 0 &&
+                                        <div className="flex items-center m-2 mr-3">
+                                            <b>{stop.index}.</b>
+                                        </div>
+                                    }
                                     <div>
                                         <p>{stop.name}</p>
                                         <p className="text-xs">{stop.address}</p>
