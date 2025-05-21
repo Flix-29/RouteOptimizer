@@ -126,7 +126,10 @@ function App() {
             mapRef.current.removeLayer('points-circle');
             mapRef.current.removeLayer('points');
             mapRef.current.removeSource('points');
-            //TODO: remove route on stops change
+        }
+        if (mapRef.current?.getLayer('route')) {
+            mapRef.current.removeLayer('route');
+            mapRef.current.removeSource('route');
         }
         if (!stops || stops.length === 0) {
             return;
@@ -271,7 +274,10 @@ function App() {
                                     </div>
                                     <>
                                         <button type="button" className="rounded p-2 ml-auto" id="delete-stop-btn"
-                                                onClick={() => setStops(stops => stops.filter(item => item !== stop))}>
+                                                onClick={() => {
+                                                    setStops(stops => stops.filter(item => item !== stop));
+                                                    stops.map(stop => stop.index = undefined);
+                                                }}>
                                             <FontAwesomeIcon icon={faXmark}/>
                                         </button>
                                     </>
