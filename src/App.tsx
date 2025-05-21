@@ -21,6 +21,7 @@ function App() {
     const [location, setLocation] = useState<Stop>();
     const [stops, setStops] = useState<Stop[]>([]);
     const [isFirstLoad, setIsFirstLoad] = useState(true);
+    const [routeCreated, setRouteCreated] = useState(false);
 
     const mapRef = useRef<mapboxgl.Map | undefined>(undefined)
     const mapContainerRef = useRef<HTMLDivElement>(null)
@@ -127,10 +128,11 @@ function App() {
             mapRef.current.removeLayer('points');
             mapRef.current.removeSource('points');
         }
-        if (mapRef.current?.getLayer('route')) {
+        if (mapRef.current?.getLayer('route') && !routeCreated) {
             mapRef.current.removeLayer('route');
             mapRef.current.removeSource('route');
         }
+        setRouteCreated(false);
         if (!stops || stops.length === 0) {
             return;
         }
@@ -180,12 +182,18 @@ function App() {
     async function startRoute() {
         const routeStops = [location].concat(stops) as Stop[];
         const response = optimizeAndGetRoute(routeStops);
-        await response.then(data => data.waypoints.map((data: { waypoint_index: number; }, index: number) => {
-            if (index === 0) {
-                return;
-            }
-            stops[index - 1].index = data.waypoint_index
-        }))
+        response.then(data => {
+            const updatedStops = stops.map((stop, i) => {
+                if (i >= data.waypoints.length - 1) return stop;
+
+                return {
+                    ...stop,
+                    index: data.waypoints[i + 1].waypoint_index
+                };
+            });
+
+            setStops(updatedStops);
+        });
         const geojson: GeoJSON.GeoJSON = {
             'type': 'Feature',
             'properties': {},
@@ -212,6 +220,7 @@ function App() {
                 }
             });
         }
+        setRouteCreated(true);
     }
 
     return (
@@ -262,7 +271,6 @@ function App() {
                         {stops.map((stop, index) => (
                             <li key={index}>
                                 <div className="flex mt-2 rounded-lg bg-gray-100 p-2">
-                                    {/*TODO: fix display*/}
                                     {stops && stops.filter(item => item.index !== undefined).length > 0 &&
                                         <div className="flex items-center m-2 mr-3">
                                             <b>{stop.index}.</b>
