@@ -1,13 +1,15 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import Mapbox, {Camera, LocationPuck, MapView} from '@rnmapbox/maps';
-import {useEffect, useMemo, useRef, useState} from 'react';
+import Mapbox, {Camera, CircleLayer, LineLayer, LocationPuck, MapView, ShapeSource, SymbolLayer} from '@rnmapbox/maps';
+import type {Feature, FeatureCollection, LineString, Point} from 'geojson';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
     ActivityIndicator,
     FlatList,
     Platform,
     Pressable,
     ScrollView,
+    Switch,
     StyleSheet,
     Text,
     TextInput,
@@ -22,16 +24,57 @@ const MAPBOX_ACCESS_TOKEN = process.env.EXPO_PUBLIC_MAP_KEY ?? '';
 const DEFAULT_CENTER: [number, number] = [-122.4194, 37.7749];
 const DEFAULT_ZOOM = 12.1;
 
+const ROUTE_LINE_STYLE = {
+    lineColor: '#0B84FF',
+    lineWidth: 5,
+    lineOpacity: 0.92,
+    lineCap: 'round',
+    lineJoin: 'round',
+} as const;
+
+const STOP_CIRCLE_STYLE = {
+    circleRadius: 14,
+    circleColor: '#1C8AFF',
+    circleStrokeColor: '#FFFFFF',
+    circleStrokeWidth: 2,
+} as const;
+
+const STOP_LABEL_STYLE = {
+    textField: ['get', 'label'],
+    textSize: 12,
+    textColor: '#FFFFFF',
+    textAllowOverlap: true,
+    textIgnorePlacement: true,
+} as const;
+
 interface Stop {
     id: string;
     title: string;
+    coordinate: [number, number];
 }
 
-const stops: Stop[] = [
-    {id: '1', title: '123 Main St, San Francisco, CA'},
-    {id: '2', title: '456 Market St, San Francisco, CA'},
-    {id: '3', title: '789 Broadway, San Francisco, CA'},
-]
+interface StopFeatureProperties {
+    label: string;
+}
+
+interface OptimizedWaypoint {
+    waypoint_index: number;
+}
+
+interface OptimizedTrip {
+    distance?: number;
+    duration?: number;
+    geometry?: {
+        coordinates: [number, number][];
+    };
+}
+
+interface OptimizedTripResponse {
+    code?: string;
+    message?: string;
+    trips?: OptimizedTrip[];
+    waypoints?: OptimizedWaypoint[];
+}
 
 if (MAPBOX_ACCESS_TOKEN) {
     Mapbox.setAccessToken(MAPBOX_ACCESS_TOKEN);
@@ -45,6 +88,54 @@ const requestLocationPermission = async () => {
         console.warn('Failed to request location permission', error);
         return false;
     }
+};
+
+const buildStopId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const stopTitleFromSearchResult = (result: GeocodingFeature) => (
+    result.properties?.full_address
+    ?? result.place_name
+    ?? result.place_formatted
+    ?? result.properties?.name
+    ?? result.text
+    ?? 'Selected stop'
+);
+
+const reorderStopsByWaypointIndex = (
+    currentStops: Stop[],
+    waypoints?: OptimizedWaypoint[],
+    waypointOffset = 0,
+): Stop[] | null => {
+    if (!waypoints || waypoints.length < currentStops.length + waypointOffset) {
+        return null;
+    }
+
+    const indexedStops = currentStops.map((stop, originalIndex) => ({
+        waypointIndex: waypoints[originalIndex + waypointOffset]?.waypoint_index,
+        stop,
+    }));
+
+    if (indexedStops.some((entry) => !Number.isFinite(entry.waypointIndex) || !entry.stop)) {
+        return null;
+    }
+
+    return indexedStops
+        .sort((left, right) => left.waypointIndex - right.waypointIndex)
+        .map((entry) => entry.stop);
+};
+
+const buildMapboxError = (service: string, status: number, details: string) => {
+    const detailText = details.trim();
+
+    if (status === 403) {
+        return `${service} returned 403. Check token scopes/URL restrictions and account access. ${detailText}`.trim();
+    }
+
+    if (status === 401) {
+        return `${service} returned 401. Check that your Mapbox token is valid and has required permissions. ${detailText}`.trim();
+    }
+
+    return `${service} failed (${status}). ${detailText}`.trim();
 };
 
 export default function Index() {
@@ -61,9 +152,18 @@ export default function Index() {
     const [isSearching, setIsSearching] = useState(false);
     const [searchError, setSearchError] = useState<string | null>(null);
 
+    const [stops, setStops] = useState<Stop[]>([]);
+    const [routeCoordinates, setRouteCoordinates] = useState<[number, number][]>([]);
+    const [routeDistanceMeters, setRouteDistanceMeters] = useState<number | null>(null);
+    const [routeDurationSeconds, setRouteDurationSeconds] = useState<number | null>(null);
+    const [isOptimizing, setIsOptimizing] = useState(false);
+    const [optimizeError, setOptimizeError] = useState<string | null>(null);
+    const [includeCurrentLocationInRoute, setIncludeCurrentLocationInRoute] = useState(false);
+
     const [isSheetOpen, setIsSheetOpen] = useState(false);
 
     const cameraRef = useRef<Camera>(null);
+    const searchInputRef = useRef<TextInput>(null);
 
     const expandedSheetHeight = useMemo(
         () => Math.min(screenHeight * 0.74, 620),
@@ -71,14 +171,81 @@ export default function Index() {
     );
     const sheetHeight = isSheetOpen ? expandedSheetHeight : 190;
 
-    const centerCamera = (longitude: number, latitude: number, nextZoom = 14) => {
+    const resetOptimizedRoute = useCallback(() => {
+        setRouteCoordinates([]);
+        setRouteDistanceMeters(null);
+        setRouteDurationSeconds(null);
+    }, []);
+
+    const centerCamera = useCallback((longitude: number, latitude: number, nextZoom = 14) => {
         setZoomLevel(nextZoom);
         cameraRef.current?.setCamera({
             centerCoordinate: [longitude, latitude],
             zoomLevel: nextZoom,
             animationDuration: 700,
         });
-    };
+    }, []);
+
+    const fitCameraToCoordinates = useCallback((coordinates: [number, number][]) => {
+        if (coordinates.length === 0) {
+            return;
+        }
+
+        let minLongitude = Number.POSITIVE_INFINITY;
+        let minLatitude = Number.POSITIVE_INFINITY;
+        let maxLongitude = Number.NEGATIVE_INFINITY;
+        let maxLatitude = Number.NEGATIVE_INFINITY;
+
+        coordinates.forEach(([longitude, latitude]) => {
+            minLongitude = Math.min(minLongitude, longitude);
+            minLatitude = Math.min(minLatitude, latitude);
+            maxLongitude = Math.max(maxLongitude, longitude);
+            maxLatitude = Math.max(maxLatitude, latitude);
+        });
+
+        if (!Number.isFinite(minLongitude) || !Number.isFinite(minLatitude) || !Number.isFinite(maxLongitude) || !Number.isFinite(maxLatitude)) {
+            return;
+        }
+
+        const minimumSpan = 0.002;
+        if (maxLongitude - minLongitude < minimumSpan) {
+            maxLongitude += minimumSpan / 2;
+            minLongitude -= minimumSpan / 2;
+        }
+
+        if (maxLatitude - minLatitude < minimumSpan) {
+            maxLatitude += minimumSpan / 2;
+            minLatitude -= minimumSpan / 2;
+        }
+
+        setFollowUserLocation(false);
+        cameraRef.current?.fitBounds(
+            [maxLongitude, maxLatitude],
+            [minLongitude, minLatitude],
+            [72, 40, sheetHeight + 20, 40],
+            700,
+        );
+    }, [sheetHeight]);
+
+    const appendStop = useCallback((stop: Stop) => {
+        resetOptimizedRoute();
+        setOptimizeError(null);
+        setStops((previousStops) => [...previousStops, stop]);
+    }, [resetOptimizedRoute]);
+
+    const canIncludeCurrentLocationInRoute = hasLocationPermission && Boolean(userCoordinate);
+
+    useEffect(() => {
+        if (!canIncludeCurrentLocationInRoute && includeCurrentLocationInRoute) {
+            setIncludeCurrentLocationInRoute(false);
+        }
+    }, [canIncludeCurrentLocationInRoute, includeCurrentLocationInRoute]);
+
+    const onToggleIncludeCurrentLocation = useCallback((nextValue: boolean) => {
+        setIncludeCurrentLocationInRoute(nextValue);
+        resetOptimizedRoute();
+        setOptimizeError(null);
+    }, [resetOptimizedRoute]);
 
     const refollowUserLocation = () => {
         if (!userCoordinate) {
@@ -128,7 +295,7 @@ export default function Index() {
             }
         };
 
-        checkPermission();
+        void checkPermission();
 
         return () => {
             isMounted = false;
@@ -167,7 +334,7 @@ export default function Index() {
                     throw new Error(`Geocoding failed: ${response.status} ${details}`);
                 }
 
-                const data = await response.json() as { features?: GeocodingFeature[] };
+                const data = await response.json() as {features?: GeocodingFeature[]};
                 setSearchResults(data.features ?? []);
             } catch (error) {
                 if (error instanceof Error && error.name === 'AbortError') {
@@ -189,23 +356,202 @@ export default function Index() {
 
     const selectSearchResult = (result: GeocodingFeature) => {
         const [longitude, latitude] = result.geometry.coordinates;
+        const title = stopTitleFromSearchResult(result);
+
         setFollowUserLocation(false);
         setSearchResults([]);
         setSearchError(null);
         centerCamera(longitude, latitude, 14);
-        setSearchQuery(
-            result.properties?.full_address
-            ?? result.place_formatted
-            ?? result.place_name
-            ?? result.properties?.name
-            ?? result.text
-            ?? '',
-        );
+
+        appendStop({
+            id: buildStopId(),
+            title,
+            coordinate: [longitude, latitude],
+        });
+
+        setSearchQuery('');
+        setIsSheetOpen(true);
+    };
+
+    const removeStop = useCallback((stopId: string) => {
+        resetOptimizedRoute();
+        setOptimizeError(null);
+        setStops((previousStops) => previousStops.filter((stop) => stop.id !== stopId));
+    }, [resetOptimizedRoute]);
+
+    const optimizeRoute = useCallback(async () => {
+        if (stops.length < 2) {
+            setOptimizeError('Add at least two stops before optimizing.');
+            return;
+        }
+
+        if (includeCurrentLocationInRoute && !userCoordinate) {
+            setOptimizeError('Current location is unavailable right now.');
+            return;
+        }
+
+        const maxStops = includeCurrentLocationInRoute ? 11 : 12;
+        if (stops.length > maxStops) {
+            setOptimizeError(`Mapbox Optimization supports up to ${maxStops} stops with current settings.`);
+            return;
+        }
+
+        if (!MAPBOX_ACCESS_TOKEN) {
+            setOptimizeError('Missing EXPO_PUBLIC_MAP_KEY. Restart Expo after updating .env.');
+            return;
+        }
+
+        setIsOptimizing(true);
+        setOptimizeError(null);
+
+        const currentStops = [...stops];
+        const shouldIncludeUserCoordinate = includeCurrentLocationInRoute && Boolean(userCoordinate);
+        const coordinatesForOptimization = shouldIncludeUserCoordinate && userCoordinate
+            ? [userCoordinate, ...currentStops.map((stop) => stop.coordinate)]
+            : currentStops.map((stop) => stop.coordinate);
+        const waypointOffset = shouldIncludeUserCoordinate ? 1 : 0;
+
+        try {
+            const coordinates = coordinatesForOptimization
+                .map((coordinate) => `${coordinate[0]},${coordinate[1]}`)
+                .join(';');
+
+            const query = new URLSearchParams({
+                access_token: MAPBOX_ACCESS_TOKEN,
+                geometries: 'geojson',
+                overview: 'full',
+                source: 'first',
+                destination: 'last',
+                roundtrip: 'false',
+            });
+
+            const response = await fetch(
+                `https://api.mapbox.com/optimized-trips/v1/mapbox/driving/${coordinates}?${query.toString()}`,
+            );
+
+            if (!response.ok) {
+                const details = await response.text();
+                throw new Error(buildMapboxError('Optimization', response.status, details));
+            }
+
+            const data = await response.json() as OptimizedTripResponse;
+            if (data.code && data.code !== 'Ok') {
+                throw new Error(data.message ?? 'Optimization request failed.');
+            }
+
+            const bestTrip = data.trips?.[0];
+            const geometryCoordinates = bestTrip?.geometry?.coordinates;
+            if (!geometryCoordinates || geometryCoordinates.length < 2) {
+                throw new Error('Optimization returned no route geometry.');
+            }
+
+            setRouteCoordinates(geometryCoordinates);
+            setRouteDistanceMeters(bestTrip.distance ?? null);
+            setRouteDurationSeconds(bestTrip.duration ?? null);
+
+            const reorderedStops = reorderStopsByWaypointIndex(currentStops, data.waypoints, waypointOffset);
+            if (reorderedStops) {
+                setStops(reorderedStops);
+            }
+
+            fitCameraToCoordinates(geometryCoordinates);
+        } catch (error) {
+            console.warn('Failed to optimize route', error);
+            resetOptimizedRoute();
+            if (error instanceof Error) {
+                setOptimizeError(error.message);
+            } else {
+                setOptimizeError('Route optimization failed. Check token permissions and network.');
+            }
+        } finally {
+            setIsOptimizing(false);
+        }
+    }, [fitCameraToCoordinates, includeCurrentLocationInRoute, resetOptimizedRoute, stops, userCoordinate]);
+
+    const focusSearchForStop = () => {
+        setIsSheetOpen(false);
+        setSearchResults([]);
+        searchInputRef.current?.focus();
+    };
+
+    const focusOnRoute = () => {
+        if (routeCoordinates.length > 1) {
+            fitCameraToCoordinates(routeCoordinates);
+            return;
+        }
+
+        if (stops.length > 0) {
+            fitCameraToCoordinates(stops.map((stop) => stop.coordinate));
+        }
     };
 
     const toggleMapStyle = () => {
         setIsSatellite((previous) => !previous);
     };
+
+    const routeShape = useMemo<Feature<LineString> | null>(() => {
+        if (routeCoordinates.length < 2) {
+            return null;
+        }
+
+        return {
+            type: 'Feature',
+            properties: {},
+            geometry: {
+                type: 'LineString',
+                coordinates: routeCoordinates,
+            },
+        };
+    }, [routeCoordinates]);
+
+    const stopShape = useMemo<FeatureCollection<Point, StopFeatureProperties> | null>(() => {
+        if (stops.length === 0) {
+            return null;
+        }
+
+        return {
+            type: 'FeatureCollection',
+            features: stops.map((stop, index) => ({
+                type: 'Feature',
+                id: stop.id,
+                properties: {
+                    label: `${index + 1}`,
+                },
+                geometry: {
+                    type: 'Point',
+                    coordinates: stop.coordinate,
+                },
+            })),
+        };
+    }, [stops]);
+
+    const durationText = routeDurationSeconds === null
+        ? '--'
+        : (() => {
+            const totalMinutes = Math.max(1, Math.round(routeDurationSeconds / 60));
+            if (totalMinutes < 60) {
+                return `${totalMinutes} min`;
+            }
+
+            const hours = Math.floor(totalMinutes / 60);
+            const remainingMinutes = totalMinutes % 60;
+            return remainingMinutes === 0
+                ? `${hours} hr`
+                : `${hours} hr ${remainingMinutes} min`;
+        })();
+    const distanceText = routeDistanceMeters === null
+        ? '--'
+        : (routeDistanceMeters / 1000).toFixed(1);
+
+    const summarySubtitle = isOptimizing
+        ? 'Optimizing route...'
+        : routeCoordinates.length > 1
+            ? `Optimized for ${stops.length} stops`
+            : stops.length < 2
+                ? 'Use search to add at least 2 stops'
+                : includeCurrentLocationInRoute
+                    ? 'Ready to optimize from your current location'
+                    : 'Ready to find best route';
 
     return (
         <View style={styles.container}>
@@ -228,6 +574,27 @@ export default function Index() {
                         zoomLevel: DEFAULT_ZOOM,
                     }}
                 />
+
+                {routeShape && (
+                    <ShapeSource id="optimizedRouteSource" shape={routeShape}>
+                        <LineLayer id="optimizedRouteLayer" style={ROUTE_LINE_STYLE}/>
+                    </ShapeSource>
+                )}
+
+                {stopShape && (
+                    <ShapeSource id="stopsSource" shape={stopShape}>
+                        <CircleLayer id="stopsCircleLayer" style={STOP_CIRCLE_STYLE}/>
+                        <CircleLayer
+                            id="stopsCenterDotLayer"
+                            style={{
+                                circleRadius: 4,
+                                circleColor: '#FFFFFF',
+                            }}
+                        />
+                        <SymbolLayer id="stopsLabelLayer" style={STOP_LABEL_STYLE}/>
+                    </ShapeSource>
+                )}
+
                 {hasLocationPermission && (
                     <LocationPuck
                         puckBearingEnabled
@@ -242,6 +609,7 @@ export default function Index() {
                     <View style={styles.searchInputWrapper}>
                         <FontAwesome name="search" size={16} color="#94A3B8"/>
                         <TextInput
+                            ref={searchInputRef}
                             value={searchQuery}
                             onChangeText={setSearchQuery}
                             placeholder="Search for a stop..."
@@ -304,21 +672,53 @@ export default function Index() {
                 <View style={styles.summaryRow}>
                     <View style={styles.summaryTextBlock}>
                         <Text style={styles.summaryTitle}>
-                            XX min <Text style={styles.summaryDistance}>(XX km)</Text>
+                            {durationText} <Text style={styles.summaryDistance}>({distanceText} km)</Text>
                         </Text>
-                        <Text style={styles.summarySubtitle}>summary</Text>
+                        <Text style={styles.summarySubtitle}>{summarySubtitle}</Text>
                     </View>
                 </View>
 
                 <View style={styles.primaryActionsRow}>
-                    <Pressable style={styles.startNavigationButton}>
-                        <FontAwesome name="location-arrow" size={20} color="#FFFFFF"/>
-                        <Text style={styles.startNavigationText}>Start Navigation</Text>
+                    <Pressable
+                        style={[
+                            styles.startNavigationButton,
+                            (stops.length < 2 || isOptimizing) && styles.disabledPrimaryButton,
+                        ]}
+                        onPress={() => {
+                            void optimizeRoute();
+                        }}
+                        disabled={stops.length < 2 || isOptimizing}
+                    >
+                        {isOptimizing ? (
+                            <ActivityIndicator size="small" color="#FFFFFF"/>
+                        ) : (
+                            <FontAwesome name="magic" size={20} color="#FFFFFF"/>
+                        )}
+                        <Text style={styles.startNavigationText}>Find Best Route</Text>
                     </Pressable>
-                    <Pressable style={styles.shareButton}>
-                        <FontAwesome name="share-alt" size={20} color="#0B84FF"/>
+                    <Pressable style={styles.shareButton} onPress={focusOnRoute}>
+                        <FontAwesome name="location-arrow" size={20} color="#0B84FF"/>
                     </Pressable>
                 </View>
+
+                <View style={styles.locationToggleRow}>
+                    <Text style={styles.locationToggleLabel}>Start from my location</Text>
+                    <Switch
+                        value={includeCurrentLocationInRoute}
+                        onValueChange={onToggleIncludeCurrentLocation}
+                        disabled={!canIncludeCurrentLocationInRoute || isOptimizing}
+                        trackColor={{false: '#CBD5E1', true: '#7FC0FF'}}
+                        thumbColor={includeCurrentLocationInRoute ? '#0B84FF' : '#F8FAFC'}
+                        ios_backgroundColor="#CBD5E1"
+                    />
+                </View>
+                {!canIncludeCurrentLocationInRoute && (
+                    <Text style={styles.locationToggleHint}>
+                        Allow location access to include your current position.
+                    </Text>
+                )}
+
+                {optimizeError && <Text style={styles.optimizeError}>{optimizeError}</Text>}
 
                 {isSheetOpen && (
                     <>
@@ -330,17 +730,30 @@ export default function Index() {
                         >
                             <View style={styles.routeStopsHeader}>
                                 <Text style={styles.routeStopsTitle}>Route Stops</Text>
-                                <Pressable style={styles.optimizeButton}>
+                                <Pressable
+                                    style={[
+                                        styles.optimizeButton,
+                                        (stops.length < 2 || isOptimizing) && styles.disabledOptimizeButton,
+                                    ]}
+                                    onPress={() => {
+                                        void optimizeRoute();
+                                    }}
+                                    disabled={stops.length < 2 || isOptimizing}
+                                >
                                     <FontAwesome name="magic" size={13} color="#0B84FF"/>
                                     <Text style={styles.optimizeButtonText}>Optimize Route</Text>
                                 </Pressable>
                             </View>
 
+                            {stops.length === 0 && (
+                                <Text style={styles.emptyStopsText}>
+                                    Add stops by selecting places in the search results.
+                                </Text>
+                            )}
+
                             {stops.map((stop, index) => (
                                 <View key={stop.id}>
                                     <View style={styles.stopRow}>
-                                        <FontAwesome name="ellipsis-v" size={19} color="#94A3B8"
-                                                     style={styles.dragIcon}/>
                                         <View style={styles.stopBadge}>
                                             <Text style={styles.stopBadgeText}>{index + 1}</Text>
                                         </View>
@@ -349,15 +762,15 @@ export default function Index() {
                                                 {stop.title}
                                             </Text>
                                         </View>
-                                        <Pressable hitSlop={8}>
-                                            <FontAwesome name="times" size={18} color="#CBD5E1"/>
+                                        <Pressable hitSlop={8} onPress={() => removeStop(stop.id)}>
+                                            <FontAwesome name="times" size={18} color="#94A3B8"/>
                                         </Pressable>
                                     </View>
                                     {index < stops.length - 1 && <View style={styles.stopConnector}/>}
                                 </View>
                             ))}
 
-                            <Pressable style={styles.addStopButton}>
+                            <Pressable style={styles.addStopButton} onPress={focusSearchForStop}>
                                 <FontAwesome name="plus-circle" size={17} color="#0B84FF"/>
                                 <Text style={styles.addStopText}>Add another stop</Text>
                             </Pressable>
@@ -540,30 +953,13 @@ const styles = StyleSheet.create({
     },
     summarySubtitle: {
         marginTop: 2,
-        fontSize: 20,
+        fontSize: 18,
         color: '#64748B',
         fontWeight: '600',
     },
-    tagGroup: {
-        flexDirection: 'row',
-    },
-    routeTag: {
-        width: 24,
-        height: 24,
-        borderRadius: 12,
-        backgroundColor: '#E8F2FF',
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginLeft: 6,
-    },
-    routeTagText: {
-        color: '#0B84FF',
-        fontSize: 12,
-        fontWeight: '700',
-    },
     primaryActionsRow: {
         marginTop: 16,
-        marginBottom: 14,
+        marginBottom: 10,
         flexDirection: 'row',
         alignItems: 'center',
     },
@@ -581,6 +977,9 @@ const styles = StyleSheet.create({
         shadowOffset: {width: 0, height: 6},
         elevation: 4,
     },
+    disabledPrimaryButton: {
+        opacity: 0.55,
+    },
     startNavigationText: {
         color: '#FFFFFF',
         fontSize: 21,
@@ -595,6 +994,31 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         marginLeft: 12,
+    },
+    locationToggleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 8,
+    },
+    locationToggleLabel: {
+        color: '#1F2937',
+        fontSize: 15,
+        fontWeight: '600',
+    },
+    locationToggleHint: {
+        color: '#64748B',
+        fontSize: 12,
+        marginBottom: 10,
+    },
+    optimizeError: {
+        color: '#B91C1C',
+        fontSize: 13,
+        backgroundColor: '#FEF2F2',
+        borderRadius: 10,
+        paddingVertical: 7,
+        paddingHorizontal: 10,
+        marginBottom: 10,
     },
     sheetDivider: {
         height: StyleSheet.hairlineWidth,
@@ -627,11 +1051,19 @@ const styles = StyleSheet.create({
         height: 38,
         paddingHorizontal: 12,
     },
+    disabledOptimizeButton: {
+        opacity: 0.5,
+    },
     optimizeButtonText: {
         marginLeft: 6,
         color: '#0B84FF',
         fontSize: 14,
         fontWeight: '700',
+    },
+    emptyStopsText: {
+        color: '#64748B',
+        fontSize: 15,
+        marginBottom: 12,
     },
     stopRow: {
         flexDirection: 'row',
@@ -689,21 +1121,5 @@ const styles = StyleSheet.create({
         color: '#0B84FF',
         fontSize: 20,
         fontWeight: '700',
-    },
-    chargingRow: {
-        marginTop: 14,
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-    },
-    chargingTextRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    chargingText: {
-        marginLeft: 10,
-        fontSize: 22,
-        color: '#475569',
-        fontWeight: '600',
     },
 });
